@@ -138,16 +138,15 @@ impl<'a, T: Any> ReadLockedResult<'a, T> {
     }
 }
 
-pub struct MyScheduler<'env, 'scope> {
-    scope: &'scope Scope<'env>,
+pub struct MyScheduler<'scope> {
     exit_signal: Arc<AtomicBool>,
     threads: Vec<ScopedJoinHandle<'scope, ()>>,
 
     sub_scheduler: SubScheduler,
 }
 
-impl<'env, 'scope> MyScheduler<'env, 'scope> {
-    pub fn new(scope: &'scope Scope<'env>) -> Self {
+impl<'scope> MyScheduler<'scope> {
+    pub fn new<'env>(scope: &'scope Scope<'env>) -> Self {
         let nthreads = std::thread::available_parallelism().unwrap().get();
         let exit_signal = Arc::new(AtomicBool::new(false));
         let (task_tx, task_rx) = unbounded::<(Id, Box<dyn ErasedTask + 'static>)>();
@@ -164,7 +163,7 @@ impl<'env, 'scope> MyScheduler<'env, 'scope> {
                         break;
                     }
                     if let Ok((id, mut task)) = task_rx.recv_timeout(Duration::from_secs_f32(0.1)) {
-                        print!("Worker received task!!!!!!!");
+                        println!("Worker received task {} !!!!!!!", id);
                         let result = task.compute(&mut sub_scheduler);
                         sub_scheduler.outcome(id, result);
                     }
@@ -173,7 +172,6 @@ impl<'env, 'scope> MyScheduler<'env, 'scope> {
             threads.push(thread);
         }
         Self {
-            scope,
             exit_signal,
             threads,
             sub_scheduler,
@@ -194,7 +192,7 @@ impl<'env, 'scope> MyScheduler<'env, 'scope> {
     }
 }
 
-impl<'env, 'scope> Drop for MyScheduler<'env, 'scope> {
+impl<'scope> Drop for MyScheduler<'scope> {
     fn drop(&mut self) {
         self.exit_signal.store(true, Ordering::Release);
         let threads = std::mem::take(&mut self.threads);
@@ -261,8 +259,15 @@ mod tests {
                     dependency,
                 )
                 .unwrap();
+            let task_ref4 = scheduler
+                .submit(
+                    Box::new(WrappedTask::new(Const { value: 0.2 })),
+                    HashSet::new(),
+                )
+                .unwrap();
             std::thread::sleep(Duration::from_secs(1));
             let result = *scheduler.get::<f32>(&task_ref3).get().unwrap();
+            let _ = *scheduler.get::<f32>(&task_ref4).get().unwrap();
             assert_eq!(result, 0.3f32);
         })
         .unwrap();
