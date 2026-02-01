@@ -7,8 +7,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::time::Duration;
 
-use crate::scheduler;
-
 use super::definition::*;
 
 pub(crate) struct TaskInfo {
@@ -82,8 +80,25 @@ impl SubScheduler {
     }
 
     pub fn outcome(&mut self, id: Id, result: ResultBox) {
-        let mut results = self.results.write().unwrap();
-        results.insert(id, result);
+        {
+            let mut results = self.results.write().unwrap();
+            results.insert(id, result);
+        }
+        let runnable_descandant_ids = {
+            let mut runnable_descandant_ids = HashSet::new();
+            let mut tasks = self.tasks.write().unwrap();
+            for descandant_id in tasks.get(&id).unwrap().descandants.clone().iter() {
+                let descandant = tasks.get_mut(descandant_id).unwrap();
+                descandant.ascandants.remove(&id);
+                if descandant.ascandants.is_empty() {
+                    runnable_descandant_ids.insert(*descandant_id);
+                }
+            }
+            runnable_descandant_ids
+        };
+        for descandant_id in runnable_descandant_ids {
+            self._submit(descandant_id);
+        }
     }
 
     pub fn get<T: Any + Send + Sync + 'static>(
@@ -100,7 +115,7 @@ impl SubScheduler {
             let item = tasks.get_mut(&id).unwrap();
             std::mem::take(&mut item.task).unwrap()
         };
-        self.task_tx.send((id, task));
+        self.task_tx.send((id, task)).unwrap();
     }
 }
 
@@ -204,17 +219,51 @@ mod tests {
                 self.value
             }
         }
+
+        struct Add {
+            lhs: TaskRef,
+            rhs: TaskRef,
+        }
+        impl Task for Add {
+            type Output = f32;
+            fn compute(self, scheduler: &mut SubScheduler) -> Self::Output {
+                let lhs = *scheduler.get::<f32>(&self.lhs).get().unwrap();
+                let rhs = *scheduler.get::<f32>(&self.rhs).get().unwrap();
+                lhs + rhs
+            }
+        }
         crossbeam::scope(|s| {
             let mut scheduler = MyScheduler::new(s);
-            let task_ref = scheduler
+            let task_ref1 = scheduler
                 .submit(
                     Box::new(WrappedTask::new(Const { value: 0.1 })),
                     HashSet::new(),
                 )
                 .unwrap();
+            let task_ref2 = scheduler
+                .submit(
+                    Box::new(WrappedTask::new(Const { value: 0.2 })),
+                    HashSet::new(),
+                )
+                .unwrap();
+            let dependency = {
+                let mut dep = HashSet::new();
+                dep.insert(task_ref1);
+                dep.insert(task_ref2);
+                dep
+            };
+            let task_ref3 = scheduler
+                .submit(
+                    Box::new(WrappedTask::new(Add {
+                        lhs: task_ref1,
+                        rhs: task_ref2,
+                    })),
+                    dependency,
+                )
+                .unwrap();
             std::thread::sleep(Duration::from_secs(1));
-            let result = *scheduler.get::<f32>(&task_ref).get().unwrap();
-            assert_eq!(result, 0.1f32);
+            let result = *scheduler.get::<f32>(&task_ref3).get().unwrap();
+            assert_eq!(result, 0.3f32);
         })
         .unwrap();
     }

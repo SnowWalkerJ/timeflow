@@ -43,7 +43,7 @@ where
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TaskRef {
     pub(crate) id: Id,
 }
