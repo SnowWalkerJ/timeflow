@@ -3,6 +3,7 @@ use crossbeam::thread::{Scope, ScopedJoinHandle};
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
+use std::process::exit;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::time::Duration;
@@ -32,7 +33,7 @@ pub struct SubScheduler {
     id: Arc<AtomicU64>,
     tasks: Arc<RwLock<TaskMap>>,
     task_tx: Sender<(Id, Box<dyn ErasedTask>)>,
-    results: Arc<RwLock<HashMap<Id, ResultBox>>>,
+    results: Arc<RwLock<HashMap<Id, Arc<RwLock<ResultBox>>>>>,
 }
 
 impl SubScheduler {
@@ -47,42 +48,36 @@ impl SubScheduler {
     pub fn submit(
         &mut self,
         task: Box<dyn ErasedTask>,
-        dependency: HashSet<TaskRef>,
-    ) -> Result<TaskRef, SubmitError> {
+        dependency: HashSet<RawTaskRef>,
+    ) -> Result<RawTaskRef, SubmitError> {
         let id = self.id.fetch_add(1, Ordering::Relaxed);
         {
             let mut tasks = self.tasks.write().unwrap();
             for dep in dependency.iter() {
-                if !(*tasks).contains_key(&dep.id) {
-                    return Err(SubmitError::new(dep.id));
+                if !(*tasks).contains_key(&dep.0) {
+                    return Err(SubmitError::new(dep.0));
                 }
-                tasks.get_mut(&dep.id).unwrap().descandants.insert(id);
+                tasks.get_mut(&dep.0).unwrap().descandants.insert(id);
             }
             tasks.insert(
                 id,
-                TaskInfo::new(task, dependency.iter().map(|d| d.id).collect()),
+                TaskInfo::new(task, dependency.iter().map(|d| d.0).collect()),
             );
         }
         let dependency_resolved = {
             let results = self.results.read().unwrap();
-            let mut dependency_resolved = true;
-            for dep in dependency.iter() {
-                if !(*results).contains_key(&dep.id) {
-                    dependency_resolved = false;
-                }
-            }
-            dependency_resolved
+            dependency.iter().all(|dep| (*results).contains_key(&dep.0))
         };
         if dependency_resolved {
             self._submit(id);
         }
-        Ok(TaskRef::new(id))
+        Ok(RawTaskRef::new(id))
     }
 
     pub fn outcome(&mut self, id: Id, result: ResultBox) {
         {
             let mut results = self.results.write().unwrap();
-            results.insert(id, result);
+            results.insert(id, Arc::new(RwLock::new(result)));
         }
         let runnable_descandant_ids = {
             let mut runnable_descandant_ids = HashSet::new();
@@ -101,12 +96,9 @@ impl SubScheduler {
         }
     }
 
-    pub fn get<T: Any + Send + Sync + 'static>(
-        &self,
-        taskref: &TaskRef,
-    ) -> ReadLockedResult<'_, T> {
-        let guard = self.results.read().unwrap();
-        ReadLockedResult::new(taskref.id, guard)
+    pub fn get(&self, taskref: &RawTaskRef) -> Option<Arc<RwLock<ResultBox>>> {
+        let guard = self.results.read().ok()?;
+        Some(Arc::clone(guard.get(&taskref.0)?))
     }
 
     fn _submit(&mut self, id: Id) {
@@ -119,44 +111,20 @@ impl SubScheduler {
     }
 }
 
-pub struct ReadLockedResult<'a, T: Any> {
-    id: Id,
-    guard: RwLockReadGuard<'a, HashMap<Id, ResultBox>>,
-    phantom: PhantomData<T>,
-}
-
-impl<'a, T: Any> ReadLockedResult<'a, T> {
-    pub fn new(id: Id, guard: RwLockReadGuard<'a, HashMap<Id, ResultBox>>) -> Self {
-        Self {
-            id,
-            guard,
-            phantom: PhantomData,
-        }
-    }
-    pub fn get(&self) -> Option<&T> {
-        self.guard.get(&self.id)?.downcast_ref::<T>()
-    }
-}
-
-pub struct MyScheduler<'scope> {
-    exit_signal: Arc<AtomicBool>,
-    threads: Vec<ScopedJoinHandle<'scope, ()>>,
-
-    sub_scheduler: SubScheduler,
-}
-
-impl<'scope> MyScheduler<'scope> {
-    pub fn new<'env>(scope: &'scope Scope<'env>) -> Self {
-        let nthreads = std::thread::available_parallelism().unwrap().get();
-        let exit_signal = Arc::new(AtomicBool::new(false));
-        let (task_tx, task_rx) = unbounded::<(Id, Box<dyn ErasedTask + 'static>)>();
-        let sub_scheduler = SubScheduler::new(task_tx);
-        let mut threads = Vec::with_capacity(nthreads);
+pub fn run<F, T>(f: F) -> T
+where
+    F: FnOnce(SubScheduler) -> T,
+{
+    let nthreads = std::thread::available_parallelism().unwrap().get();
+    let exit_signal = Arc::new(AtomicBool::new(false));
+    let (task_tx, task_rx) = unbounded::<(Id, Box<dyn ErasedTask + 'static>)>();
+    let sub_scheduler = SubScheduler::new(task_tx);
+    crossbeam::scope(|scope| {
         for _ in 0..nthreads {
             let exist_signal = Arc::clone(&exit_signal);
             let task_rx = task_rx.clone();
             let sub_scheduler = sub_scheduler.clone();
-            let thread = scope.spawn(move |_| {
+            scope.spawn(move |_| {
                 let mut sub_scheduler = sub_scheduler;
                 loop {
                     if exist_signal.load(Ordering::Acquire) {
@@ -169,38 +137,23 @@ impl<'scope> MyScheduler<'scope> {
                     }
                 }
             });
-            threads.push(thread);
         }
-        Self {
-            exit_signal,
-            threads,
-            sub_scheduler,
-        }
-    }
-    pub fn submit(
-        &mut self,
-        task: Box<dyn ErasedTask + 'static>,
-        dependency: HashSet<TaskRef>,
-    ) -> Result<TaskRef, SubmitError> {
-        self.sub_scheduler.submit(task, dependency)
-    }
-    pub fn get<T: Any + Send + Sync + 'static>(
-        &self,
-        taskref: &TaskRef,
-    ) -> ReadLockedResult<'_, T> {
-        self.sub_scheduler.get::<T>(taskref)
-    }
+        let result = f(sub_scheduler);
+        exit_signal.store(true, Ordering::Release);
+        result
+    })
+    .unwrap()
 }
 
-impl<'scope> Drop for MyScheduler<'scope> {
-    fn drop(&mut self) {
-        self.exit_signal.store(true, Ordering::Release);
-        let threads = std::mem::take(&mut self.threads);
-        for thread in threads.into_iter() {
-            thread.join().unwrap();
-        }
-        println!("Scheduler dropped!!!!!!!!!!");
-    }
+#[macro_export]
+macro_rules! submit {
+    ($scheduler:ident, $task:expr) => {{
+        let complete_task = $task;
+        let dependency = complete_task.dependency();
+        let task = complete_task.task();
+        let raw_task_ref = $scheduler.submit(Box::new(WrappedTask::new(task)), dependency);
+        raw_task_ref
+    }};
 }
 
 #[cfg(test)]
@@ -217,59 +170,77 @@ mod tests {
                 self.value
             }
         }
+        impl CompleteTask for Const {
+            type Output = f32;
+            fn dependency(&self) -> HashSet<RawTaskRef> {
+                HashSet::new()
+            }
+            fn task(self) -> impl Task<Output = Self::Output> {
+                self
+            }
+        }
 
         struct Add {
-            lhs: TaskRef,
-            rhs: TaskRef,
+            lhs: RawTaskRef,
+            rhs: RawTaskRef,
         }
         impl Task for Add {
             type Output = f32;
             fn compute(self, scheduler: &mut SubScheduler) -> Self::Output {
-                let lhs = *scheduler.get::<f32>(&self.lhs).get().unwrap();
-                let rhs = *scheduler.get::<f32>(&self.rhs).get().unwrap();
+                let lhs_lock = scheduler.get(&self.lhs).unwrap();
+                let lhs_ref: &f32 = lhs_lock.read().unwrap().downcast_ref().unwrap();
+                let lhs: f32 = *scheduler
+                    .get(&self.lhs)
+                    .unwrap()
+                    .read()
+                    .unwrap()
+                    .downcast_ref()
+                    .unwrap();
+                let rhs: f32 = *scheduler
+                    .get(&self.rhs)
+                    .unwrap()
+                    .read()
+                    .unwrap()
+                    .downcast_ref()
+                    .unwrap();
                 lhs + rhs
             }
         }
-        crossbeam::scope(|s| {
-            let mut scheduler = MyScheduler::new(s);
-            let task_ref1 = scheduler
-                .submit(
-                    Box::new(WrappedTask::new(Const { value: 0.1 })),
-                    HashSet::new(),
-                )
-                .unwrap();
-            let task_ref2 = scheduler
-                .submit(
-                    Box::new(WrappedTask::new(Const { value: 0.2 })),
-                    HashSet::new(),
-                )
-                .unwrap();
-            let dependency = {
-                let mut dep = HashSet::new();
-                dep.insert(task_ref1);
-                dep.insert(task_ref2);
-                dep
-            };
-            let task_ref3 = scheduler
-                .submit(
-                    Box::new(WrappedTask::new(Add {
-                        lhs: task_ref1,
-                        rhs: task_ref2,
-                    })),
-                    dependency,
-                )
-                .unwrap();
-            let task_ref4 = scheduler
-                .submit(
-                    Box::new(WrappedTask::new(Const { value: 0.2 })),
-                    HashSet::new(),
-                )
-                .unwrap();
+        impl CompleteTask for Add {
+            type Output = f32;
+            fn dependency(&self) -> HashSet<RawTaskRef> {
+                let mut deps = HashSet::new();
+                deps.insert(self.lhs);
+                deps.insert(self.rhs);
+                deps
+            }
+            fn task(self) -> impl Task<Output = Self::Output> {
+                self
+            }
+        }
+        run(|mut scheduler| {
+            let task_ref1 = submit!(scheduler, Const { value: 0.1 }).unwrap();
+            let task_ref2 = submit!(scheduler, Const { value: 0.2 }).unwrap();
+            let task_ref3 = submit!(
+                scheduler,
+                Add {
+                    lhs: task_ref1,
+                    rhs: task_ref2,
+                }
+            )
+            .unwrap();
+
+            let task_ref4 = submit!(scheduler, Const { value: 0.2 }).unwrap();
             std::thread::sleep(Duration::from_secs(1));
-            let result = *scheduler.get::<f32>(&task_ref3).get().unwrap();
-            let _ = *scheduler.get::<f32>(&task_ref4).get().unwrap();
+            let result: f32 = *scheduler
+                .get(&task_ref3)
+                .unwrap()
+                .read()
+                .unwrap()
+                .downcast_ref()
+                .unwrap();
+            let _ = *scheduler.get(&task_ref4).unwrap().read().unwrap();
             assert_eq!(result, 0.3f32);
-        })
-        .unwrap();
+        });
     }
 }

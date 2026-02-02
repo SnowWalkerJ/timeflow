@@ -1,4 +1,6 @@
 use std::any::Any;
+use std::collections::HashSet;
+use std::marker::PhantomData;
 use std::time::Duration;
 
 use crate::scheduler::SubScheduler;
@@ -43,25 +45,66 @@ where
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TaskRef {
-    pub(crate) id: Id,
+pub struct RawTaskRef(pub(crate) Id);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TypedTaskRef<T> {
+    raw: RawTaskRef,
+    phantom: PhantomData<*const T>,
 }
 
-impl TaskRef {
+impl<T> std::ops::Deref for TypedTaskRef<T> {
+    type Target = RawTaskRef;
+    fn deref(&self) -> &Self::Target {
+        &self.raw
+    }
+}
+
+impl RawTaskRef {
     pub(crate) fn new(id: Id) -> Self {
-        Self { id }
+        Self(id)
+    }
+}
+
+pub trait TaskRef {
+    fn get_ref(&self) -> RawTaskRef;
+}
+
+impl<T> TaskRef for TypedTaskRef<T> {
+    fn get_ref(&self) -> RawTaskRef {
+        self.raw
+    }
+}
+
+impl TaskRef for RawTaskRef {
+    fn get_ref(&self) -> RawTaskRef {
+        self.clone()
     }
 }
 
 pub trait Scheduler {
-    fn submit<R: Send + Any, T: Task<Output = R> + 'static>(
+    fn submit<R: Send + Any + Sync + 'static, T: Task<Output = R> + 'static>(
         &mut self,
         task: T,
-        dependencies: Vec<TaskRef>,
-    ) -> Result<TaskRef, SubmitError>;
+        dependencies: HashSet<RawTaskRef>,
+    ) -> Result<TypedTaskRef<R>, SubmitError> {
+        let task = Box::new(WrappedTask::new(task));
+        let raw_task_ref = self.submit_erased(task, dependencies)?;
+        Ok(TypedTaskRef {
+            raw: raw_task_ref,
+            phantom: PhantomData,
+        })
+    }
 
-    fn get<T: Send + Any>(&self, task_ref: &TaskRef) -> Option<&T>;
-    fn wait(&self, task_ref: &TaskRef, timeout: Option<Duration>) -> bool;
+    fn submit_erased(
+        &mut self,
+        task: Box<dyn ErasedTask>,
+        dependency: HashSet<RawTaskRef>,
+    ) -> Result<RawTaskRef, SubmitError>;
+
+    fn get<T: Sync + Send + Any + 'static>(&self, task_ref: &TypedTaskRef<T>) -> Option<&T>;
+    fn get_erased(&self, task_ref: RawTaskRef) -> Option<&ResultBox>;
+    fn wait(&self, task_ref: &RawTaskRef, timeout: Option<Duration>) -> bool;
 }
 
 #[derive(Debug)]
@@ -86,3 +129,9 @@ impl std::fmt::Display for SubmitError {
 }
 
 impl std::error::Error for SubmitError {}
+
+pub trait CompleteTask {
+    type Output;
+    fn task(self) -> impl Task<Output = Self::Output>;
+    fn dependency(&self) -> HashSet<RawTaskRef>;
+}

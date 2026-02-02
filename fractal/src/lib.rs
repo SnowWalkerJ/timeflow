@@ -1,5 +1,7 @@
 mod definition;
 mod scheduler;
 
-pub use definition::{Scheduler, SubmitError, Task, TaskRef};
-pub use scheduler::{MyScheduler, SubScheduler};
+pub use definition::{
+    CompleteTask, RawTaskRef, Scheduler, SubmitError, Task, TypedTaskRef, WrappedTask,
+};
+pub use scheduler::{SubScheduler, run};

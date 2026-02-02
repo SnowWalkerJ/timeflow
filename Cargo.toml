@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = ["fractal"]
+members = ["fractal", "fractal-macro"]
 
 [dependencies]
+fractal = {path = "fractal"}
+fractal-macro = {path = "fractal-macro"}
