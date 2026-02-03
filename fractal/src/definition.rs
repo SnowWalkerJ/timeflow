@@ -11,7 +11,8 @@ pub trait Task: Send + Sync {
     fn compute(self, scheduler: &mut SubScheduler) -> Self::Output;
 }
 
-pub type ResultBox = Box<dyn Any + Sync + Send + 'static>;
+pub type ResultType = dyn Any + Sync + Send + 'static;
+pub type ResultBox = Box<ResultType>;
 
 pub trait ErasedTask: Send + Sync {
     fn compute(&mut self, scheduler: &mut SubScheduler) -> ResultBox;

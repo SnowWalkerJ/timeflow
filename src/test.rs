@@ -2,8 +2,8 @@ use fractal::{CompleteTask, RawTaskRef, SubScheduler, Task};
 use fractal_macro::task_op;
 
 #[task_op]
-fn func(a: &f32) -> f32 {
-    a + 1.0
+fn add(a: &f32, b: &f32) -> f32 {
+    a + b
 }
 
 #[task_op]
@@ -18,15 +18,10 @@ fn test() {
     use fractal::{WrappedTask, run, submit};
     run(|mut scheduler| {
         let a = submit!(scheduler, one()).unwrap();
-        let f = submit!(scheduler, func(a)).unwrap();
+        let b = submit!(scheduler, one()).unwrap();
+        let f = submit!(scheduler, add(a, b)).unwrap();
         std::thread::sleep(Duration::from_secs(1));
-        let result: f32 = *scheduler
-            .get(&f)
-            .unwrap()
-            .read()
-            .unwrap()
-            .downcast_ref()
-            .unwrap();
+        let result: f32 = *scheduler.get(&f).unwrap().downcast_ref().unwrap();
         println!("{}", result);
     });
 }

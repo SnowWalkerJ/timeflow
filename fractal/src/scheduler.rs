@@ -33,7 +33,7 @@ pub struct SubScheduler {
     id: Arc<AtomicU64>,
     tasks: Arc<RwLock<TaskMap>>,
     task_tx: Sender<(Id, Box<dyn ErasedTask>)>,
-    results: Arc<RwLock<HashMap<Id, Arc<RwLock<ResultBox>>>>>,
+    results: Arc<RwLock<HashMap<Id, Arc<ResultType>>>>,
 }
 
 impl SubScheduler {
@@ -96,7 +96,7 @@ impl SubScheduler {
         }
     }
 
-    pub fn get(&self, taskref: &RawTaskRef) -> Option<Arc<RwLock<ResultBox>>> {
+    pub fn get(&self, taskref: &RawTaskRef) -> Option<Arc<ResultType>> {
         let guard = self.results.read().ok()?;
         Some(Arc::clone(guard.get(&taskref.0)?))
     }
@@ -187,22 +187,8 @@ mod tests {
         impl Task for Add {
             type Output = f32;
             fn compute(self, scheduler: &mut SubScheduler) -> Self::Output {
-                let lhs_lock = scheduler.get(&self.lhs).unwrap();
-                let lhs_ref: &f32 = lhs_lock.read().unwrap().downcast_ref().unwrap();
-                let lhs: f32 = *scheduler
-                    .get(&self.lhs)
-                    .unwrap()
-                    .read()
-                    .unwrap()
-                    .downcast_ref()
-                    .unwrap();
-                let rhs: f32 = *scheduler
-                    .get(&self.rhs)
-                    .unwrap()
-                    .read()
-                    .unwrap()
-                    .downcast_ref()
-                    .unwrap();
+                let lhs: f32 = *scheduler.get(&self.lhs).unwrap().downcast_ref().unwrap();
+                let rhs: f32 = *scheduler.get(&self.rhs).unwrap().downcast_ref().unwrap();
                 lhs + rhs
             }
         }
@@ -232,14 +218,8 @@ mod tests {
 
             let task_ref4 = submit!(scheduler, Const { value: 0.2 }).unwrap();
             std::thread::sleep(Duration::from_secs(1));
-            let result: f32 = *scheduler
-                .get(&task_ref3)
-                .unwrap()
-                .read()
-                .unwrap()
-                .downcast_ref()
-                .unwrap();
-            let _ = *scheduler.get(&task_ref4).unwrap().read().unwrap();
+            let result: f32 = *scheduler.get(&task_ref3).unwrap().downcast_ref().unwrap();
+            let _ = *scheduler.get(&task_ref4).unwrap();
             assert_eq!(result, 0.3f32);
         });
     }

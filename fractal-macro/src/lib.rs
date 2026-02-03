@@ -47,7 +47,7 @@ pub fn task_op(_: TokenStream, item: TokenStream) -> TokenStream {
                 #(
                     let #param_names = scheduler.get(&self.#param_names).unwrap();
                 )*
-                Self::_run(#(#param_names.read().unwrap().downcast_ref().unwrap()),*)
+                Self::_run(#(#param_names.downcast_ref().unwrap()),*)
             }
         }
         impl CompleteTask for #struct_name {
