@@ -21,7 +21,8 @@ fn test() {
         let b = submit!(scheduler, one()).unwrap();
         let f = submit!(scheduler, add(a, b)).unwrap();
         std::thread::sleep(Duration::from_secs(1));
-        let result: f32 = *scheduler.get(&f).unwrap().downcast_ref().unwrap();
+        let tmp = scheduler.get(&f);
+        let result: f32 = *tmp.unwrap().downcast_ref().unwrap();
         println!("{}", result);
     });
 }

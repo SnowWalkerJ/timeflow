@@ -77,7 +77,7 @@ impl SubScheduler {
     pub fn outcome(&mut self, id: Id, result: ResultBox) {
         {
             let mut results = self.results.write().unwrap();
-            results.insert(id, Arc::new(RwLock::new(result)));
+            results.insert(id, Arc::from(result));
         }
         let runnable_descandant_ids = {
             let mut runnable_descandant_ids = HashSet::new();
